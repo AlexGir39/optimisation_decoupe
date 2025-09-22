@@ -3,14 +3,14 @@ import pulp
 import numpy as np
 import pandas as pd
 
-
+# --- Fonction d'optimisation ---
 def optimisation_coupe(P, L, l):
-    '''
+    """
     P : liste des longueurs de barres disponibles
     L : liste des quantités demandées pour chaque longueur de pièce
     l : liste des longueurs des pièces demandées
     Retourne le plan de coupe optimal X (M x N), le gaspillage par barre et le gaspillage total
-    '''
+    """
     P = np.array(P)
     L = np.array(L)
     l = np.array(l)
@@ -53,34 +53,41 @@ def optimisation_coupe(P, L, l):
 
     return X_sol, gaspillage_par_barre, gaspillage_total
 
-
 # --- Interface Streamlit ---
 st.title("🪚 Optimiseur de plan de coupe")
-
 st.markdown("Cette application résout un problème de **découpe de barres** pour minimiser le gaspillage.")
 
-# Entrées utilisateur
 st.sidebar.header("Paramètres d'entrée")
 
-# Longueurs des barres disponibles
-P_str = st.sidebar.text_input("Longueurs des barres disponibles (séparées par des virgules)", "6,6,6")
-P = list(map(float, P_str.split(",")))
+# --- Types de barres et quantités ---
+P_types_str = st.sidebar.text_input("Types de barres disponibles (séparées par des virgules)", "6,8")
+P_types = list(map(float, P_types_str.split(",")))
 
-# Longueurs des pièces demandées
+st.subheader("📋 Quantités disponibles pour chaque type de barre")
+df_barres = pd.DataFrame({
+    "Longueur de barre": P_types,
+    "Quantité disponible": [1 for _ in P_types]
+})
+df_barres_result = st.data_editor(df_barres, num_rows="fixed")
+
+# Reconstituer le vecteur complet P
+P = []
+for idx, row in df_barres_result.iterrows():
+    P.extend([row["Longueur de barre"]] * int(row["Quantité disponible"]))
+
+# --- Longueurs et quantités des pièces ---
 l_str = st.sidebar.text_input("Longueurs des pièces demandées (séparées par des virgules)", "1,5")
 l = list(map(float, l_str.split(",")))
 
-# Tableau interactif pour les quantités demandées
-st.subheader("📋 Quantités demandées pour chaque longueur")
+st.subheader("📋 Quantités demandées pour chaque longueur de pièce")
 df_input = pd.DataFrame({
     "Longueur demandée": l,
-    "Quantité demandée": [1 for _ in l]  # valeur par défaut
+    "Quantité demandée": [1 for _ in l]
 })
-
 df_result = st.data_editor(df_input, num_rows="fixed")
 L = df_result["Quantité demandée"].tolist()
 
-# Vérification cohérence
+# --- Optimisation ---
 if len(L) != len(l):
     st.error("❌ La taille du vecteur L doit correspondre à la taille du vecteur l.")
 else:
@@ -92,7 +99,7 @@ else:
         else:
             st.success("✅ Solution optimale trouvée !")
 
-            # Affichage du plan de coupe
+            # Plan de coupe
             df_plan = pd.DataFrame(X_sol,
                                    columns=[f"Longueur {li}m" for li in l],
                                    index=[f"Barre {p}m" for p in P])
