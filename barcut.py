@@ -3,7 +3,7 @@ import pulp
 import numpy as np
 import pandas as pd
 
-print("test")
+
 def optimisation_coupe(P, L, l):
     '''
     P : liste des longueurs de barres disponibles
