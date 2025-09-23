@@ -1,0 +1,2 @@
+from .primal_cutting_stock import optimisation_min_matiere
+from .dual_cutting_stock import optimisation_min_matiere_dual
