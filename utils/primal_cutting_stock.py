@@ -58,6 +58,7 @@ def optimisation_min_matiere(P_types, l, L, solver_msg=False):
     # Résoudre
     prob.solve(pulp.PULP_CBC_CMD(msg=1 if solver_msg else 0))
 
+
     if pulp.LpStatus[prob.status] != "Optimal":
         return None, None, None, None, None, None
 
