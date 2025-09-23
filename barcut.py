@@ -12,7 +12,7 @@ def optimisation_coupe_min_barres(P_types, l, L):
     Retourne X_sol, nombre de barres utilisées de chaque type, gaspillage par barre, gaspillage total
     """
     P_types = np.array(P_types)
-    l = np.array(l)
+    l = np.array(l)/1000
     L = np.array(L)
     N_pieces = len(l)
     N_barres = len(P_types)
@@ -82,11 +82,11 @@ st.title("🪚 Optimiseur Cutting Stock minimal barres")
 st.markdown("Donnez les longueurs des barres disponibles. L'algorithme choisira le nombre minimal de barres pour satisfaire la demande.")
 
 # Entrée des barres
-P_types_str = st.sidebar.text_input("Longueurs de barres disponibles (séparées par des virgules) [en mètres]", "6")
+P_types_str = st.sidebar.text_input("Longueur de barre disponible [en mètres]", "6")
 P_types = list(map(float, P_types_str.split(",")))
 
 # Entrée des pièces
-l_str = st.sidebar.text_input("Longueurs des pièces demandées (séparées par des virgules) [en milimètres]", "1,5")
+l_str = st.sidebar.text_input("Longueurs des pièces demandées (séparées par des virgules) [en milimètres]", "1000,1100")
 l = list(map(float, l_str.split(",")))
 
 # Tableau interactif des quantités demandées
@@ -99,7 +99,7 @@ df_result = st.data_editor(df_input, num_rows="fixed")
 L = df_result["Quantité demandée"].tolist()
 
 if st.button("Optimiser"):
-    X_sol, P_assigned, gaspillage, gaspillage_total = optimisation_coupe_min_barres(P_types, l/1000, L)
+    X_sol, P_assigned, gaspillage, gaspillage_total = optimisation_coupe_min_barres(P_types, l, L)
     if X_sol is None or len(X_sol) == 0:
         st.error("⚠️ Aucun plan optimal trouvé.")
     else:
@@ -107,7 +107,7 @@ if st.button("Optimiser"):
 
         # Plan de coupe
         df_plan = pd.DataFrame(X_sol,
-                               columns=[f"Longueur {li}" for li in l],
+                               columns=[f"Longueur {li}mm" for li in l],
                                index=[f"Barre {i+1} ({P_assigned[i]}m)" for i in range(len(P_assigned))])
         st.subheader("📊 Plan de coupe optimal")
         st.dataframe(df_plan)
