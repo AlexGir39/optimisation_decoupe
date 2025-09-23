@@ -137,7 +137,7 @@ if st.button("Optimiser"):
         df_gaspillage = pd.DataFrame({
             "Barre": [f"Barre {i+1}" for i in range(len(bar_types_used))],
             "Longueur de barre [m]": bar_types_used,
-            "Gaspillage [mm]": gaspillage
+            "Gaspillage [m]": gaspillage
         })
         st.subheader("🗑️ Gaspillage par barre")
         st.table(df_gaspillage)
