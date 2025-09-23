@@ -82,11 +82,11 @@ st.title("🪚 Optimiseur Cutting Stock minimal barres")
 st.markdown("Donnez les longueurs des barres disponibles. L'algorithme choisira le nombre minimal de barres pour satisfaire la demande.")
 
 # Entrée des barres
-P_types_str = st.sidebar.text_input("Longueurs de barres disponibles (séparées par des virgules)", "6,8")
+P_types_str = st.sidebar.text_input("Longueurs de barres disponibles (séparées par des virgules) [en mètres]", "6")
 P_types = list(map(float, P_types_str.split(",")))
 
 # Entrée des pièces
-l_str = st.sidebar.text_input("Longueurs des pièces demandées (séparées par des virgules)", "1,5")
+l_str = st.sidebar.text_input("Longueurs des pièces demandées (séparées par des virgules) [en milimètres]", "1,5")
 l = list(map(float, l_str.split(",")))
 
 # Tableau interactif des quantités demandées
@@ -99,7 +99,7 @@ df_result = st.data_editor(df_input, num_rows="fixed")
 L = df_result["Quantité demandée"].tolist()
 
 if st.button("Optimiser"):
-    X_sol, P_assigned, gaspillage, gaspillage_total = optimisation_coupe_min_barres(P_types, l, L)
+    X_sol, P_assigned, gaspillage, gaspillage_total = optimisation_coupe_min_barres(P_types, l/1000, L)
     if X_sol is None or len(X_sol) == 0:
         st.error("⚠️ Aucun plan optimal trouvé.")
     else:
