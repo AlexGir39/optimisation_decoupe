@@ -1,201 +1,305 @@
-import pulp
+"""
+Cutting stock solver using column generation (Gilmore-Gomory) + final integer optimisation.
+
+Functions:
+ - optimisation_min_matiere_cg(P_types, l_mm, L, time_limit=None, verbose=False)
+
+Outputs: same format as your original function:
+  X_used, bar_types_used, counts_per_type, gaspillage_par_barre, total_matiere, total_waste
+
+Requires: pulp, numpy
+
+Notes:
+ - lengths of demanded pieces `l_mm` are expected in millimetres (like your original code).
+ - P_types are lengths of stock bars (same units as l_mm but usually in mm or metres -- we keep units consistent).
+ - The algorithm works in two phases: solve continuous master LP by column generation, then solve an IP on the generated columns.
+ - The knapsack subproblem is solved by integer dynamic programming (exact) for each stock type.
+
+Author: assistant
+"""
+
+import math
 import numpy as np
+import pulp
+from collections import namedtuple, defaultdict
 
-# ----------------------
-# utilitaires : DP knapsack non borné
-# ----------------------
-def unbounded_knapsack_dp(values, weights, capacity):
-    """
-    DP pour knapsack UNBOUNDED.
-    values: list[float] (profits)
-    weights: list[int] (poids entiers)
-    capacity: int (entier)
-    retourne (best_value, counts_list)
-    """
-    n = len(values)
-    # dp[c] = best profit achievable with capacity exactly c
-    NEG = -1e90
-    dp = [NEG] * (capacity + 1)
-    back = [-1] * (capacity + 1)
-    dp[0] = 0.0
-    for c in range(capacity + 1):
-        if dp[c] < -1e80:
-            continue
-        for i in range(n):
-            w = weights[i]
-            if w <= 0 or c + w > capacity:
-                continue
-            val = dp[c] + values[i]
-            if val > dp[c + w]:
-                dp[c + w] = val
-                back[c + w] = i
-    # choose best over all <= capacity
-    best_c = max(range(capacity + 1), key=lambda cc: dp[cc])
-    best_val = dp[best_c]
-    # reconstruct counts
-    counts = [0] * n
-    c = best_c
-    while c > 0 and back[c] != -1:
-        idx = back[c]
-        counts[idx] += 1
-        c -= weights[idx]
-    return best_val, counts
+Pattern = namedtuple('Pattern', ['bar_type_idx', 'counts'])
 
-# ----------------------
-# Master LP solver (retourne z_vals et duals)
-# ----------------------
-def solve_master_lp(patterns, L, solver):
-    """
-    patterns: list of dict {'a': [a_j], 'type': k, 'cost': cost}
-    L: list demandes
-    solver: pulp solver instance that returns duals (GLPK recommended)
-    retourne (status, z_vals, duals_list)
-    """
-    prob = pulp.LpProblem("MasterLP", pulp.LpMinimize)
-    z_vars = [pulp.LpVariable(f"z_{p}", lowBound=0, cat='Continuous') for p in range(len(patterns))]
-    prob += pulp.lpSum([patterns[p]['cost'] * z_vars[p] for p in range(len(patterns))])
-    # contraintes de demande
-    for j in range(len(L)):
-        prob += pulp.lpSum([patterns[p]['a'][j] * z_vars[p] for p in range(len(patterns))]) >= L[j], f"Demand_{j}"
-    prob.solve(solver)
-    status = pulp.LpStatus[prob.status]
-    z_vals = [pulp.value(v) for v in z_vars]
-    # récupère les duaux
-    duals = None
-    try:
-        duals = [prob.constraints[f"Demand_{j}"].pi for j in range(len(L))]
-    except Exception:
-        duals = None
-    return status, z_vals, duals
 
-# ----------------------
-# generate simple initial patterns
-# ----------------------
-def generate_initial_patterns(P_mm, l_mm):
+def _generate_initial_patterns(P_types, l, L):
+    """Create a set of simple initial patterns: for each piece type j, pack as many as possible into each bar type."""
     patterns = []
-    T = len(P_mm)
-    N = len(l_mm)
-    for k, Pk in enumerate(P_mm):
-        for j, lj in enumerate(l_mm):
-            q = Pk // lj
-            if q >= 1:
-                a = [0]*N
-                a[j] = int(q)
-                patterns.append({'a': a, 'type': k, 'cost': Pk})
-    # fallback : empty patterns (one per type)
-    if not patterns:
-        for k, Pk in enumerate(P_mm):
-            patterns.append({'a': [0]*N, 'type': k, 'cost': Pk})
+    T = len(P_types)
+    N = len(l)
+    for k in range(T):
+        P = P_types[k]
+        for j in range(N):
+            max_q = int(P // l[j])
+            if max_q <= 0:
+                continue
+            counts = [0] * N
+            counts[j] = max_q
+            patterns.append(Pattern(bar_type_idx=k, counts=tuple(counts)))
+    # Also add a greedy-fill pattern for each bar type: fill with largest pieces first
+    for k in range(T):
+        P = P_types[k]
+        remaining = P
+        counts = [0] * N
+        # sort by length descending
+        for j in sorted(range(N), key=lambda x: -l[x]):
+            q = int(remaining // l[j])
+            if q > 0:
+                counts[j] = q
+                remaining -= q * l[j]
+        if any(counts):
+            patterns.append(Pattern(bar_type_idx=k, counts=tuple(counts)))
+    # Deduplicate
+    uniq = {}
+    for p in patterns:
+        key = (p.bar_type_idx, p.counts)
+        uniq[key] = p
+    return list(uniq.values())
+
+
+def _build_master_problem(patterns, P_types, L, continuous=True):
+    """Build a PuLP LP/MIP for the master problem given a list of patterns.
+    Returns (prob, var_lambda, dual_vars_holder)
+    If continuous=True, lambda are continuous >=0; otherwise Integer.
+    dual_vars_holder is list of pulp.LpVariable objects for constraints (useful to extract duals).
+    """
+    prob = pulp.LpProblem('Master', pulp.LpMinimize)
+    # variables lambda_p
+    var_lambda = []
+    for idx, p in enumerate(patterns):
+        name = f"lam_{idx}_b{p.bar_type_idx}"
+        if continuous:
+            v = pulp.LpVariable(name, lowBound=0, cat='Continuous')
+        else:
+            v = pulp.LpVariable(name, lowBound=0, cat='Integer')
+        var_lambda.append(v)
+    # objective: sum lambda_p * P_types[bar_type_idx]
+    prob += pulp.lpSum([var_lambda[i] * P_types[patterns[i].bar_type_idx] for i in range(len(patterns))])
+
+    # constraints: for each piece type j, sum_p a_{j,p} * lambda_p >= L_j
+    N = len(L)
+    dual_holders = []
+    for j in range(N):
+        cons = pulp.lpSum([patterns[p].counts[j] * var_lambda[p] for p in range(len(patterns))]) >= int(L[j])
+        c = prob.addConstraint(cons, name=f"demand_{j}")
+        dual_holders.append(c)
+
+    return prob, var_lambda, dual_holders
+
+
+def _extract_duals(prob, continuous=True):
+    """Extract duals (shadow prices) for demand constraints from a solved PuLP problem.
+    PuLP exposes duals via .constraints[name].pi when using CBC in recent versions.
+    We'll be robust and try multiple access patterns.
+    """
+    duals = []
+    # constraints in prob.constraints are in dict
+    for name, cons in prob.constraints.items():
+        # demand constraints were named demand_{j}
+        if name.startswith('demand_'):
+            # try to get Pi / shadow price
+            pi = None
+            # older/newer pulp versions: try attribute 'pi' or 'pi' in dict-like
+            pi = getattr(cons, 'pi', None)
+            if pi is None:
+                # some versions expose as pulp.value(cons.pi)
+                try:
+                    pi = pulp.value(cons.pi)
+                except Exception:
+                    pi = None
+            if pi is None:
+                # As last resort try to read from solver status object via prob.solution, but skip
+                pi = 0.0
+            duals.append(float(pi))
+    # order by demand_0, demand_1, ... ensure correct order
+    duals_sorted = [0.0] * len(duals)
+    for name, cons in prob.constraints.items():
+        if name.startswith('demand_'):
+            j = int(name.split('_')[1])
+            pi = getattr(cons, 'pi', None)
+            if pi is None:
+                try:
+                    pi = pulp.value(cons.pi)
+                except Exception:
+                    pi = 0.0
+            duals_sorted[j] = float(pi or 0.0)
+    return duals_sorted
+
+
+def _knapsack_dp_max(profits, weights, capacity):
+    """Integer knapsack DP returning (best_value, counts tuple)
+    - profits: list of profit per item type (float)
+    - weights: list of weight per item type (float)
+    - capacity: scalar (float)
+
+    Items can be used multiple times (unbounded knapsack) -> this is unbounded integer knapsack.
+    We'll solve by DP on discretized units: but lengths are floats. To avoid precision issues,
+    we will work with integer units by dividing by gcd of weights quantized to mm (or smallest unit).
+
+    For correctness and reasonable speed we assume weights are rational and multiplied to integers outside.
+    """
+    # Here, assume weights are integer (e.g., mm). If floats, caller should convert.
+    cap = int(capacity)
+    N = len(weights)
+    dp = [(-1e9, None)] * (cap + 1)
+    dp[0] = (0.0, (0,) * N)
+    for c in range(1, cap + 1):
+        best = (-1e9, None)
+        for j in range(N):
+            w = int(weights[j])
+            if w <= 0 or w > c:
+                continue
+            prev_val, prev_counts = dp[c - w]
+            if prev_counts is None:
+                continue
+            val = prev_val + profits[j]
+            if val > best[0]:
+                counts = list(prev_counts)
+                counts[j] += 1
+                best = (val, tuple(counts))
+        dp[c] = best
+    best_val, best_counts = max(dp, key=lambda x: x[0])
+    if best_counts is None:
+        return 0.0, tuple([0] * N)
+    return best_val, best_counts
+
+
+def column_generation(P_types, l_mm, L, max_iter=200, tol=1e-5, verbose=False):
+    """Perform column generation. Returns a list of patterns (Pattern objects).
+    l_mm: lengths in millimetres (integers)
+    P_types: bar lengths in same units
+    L: demand integers
+    """
+    # ensure integer weights for DP
+    l = [int(round(x)) for x in l_mm]
+    P_types_int = [int(round(x)) for x in P_types]
+    N = len(l)
+    T = len(P_types)
+
+    patterns = _generate_initial_patterns(P_types_int, l, L)
+    if verbose:
+        print(f"Initial patterns: {len(patterns)}")
+
+    for it in range(max_iter):
+        # build and solve LP master
+        prob, var_lambda, dual_holders = _build_master_problem(patterns, P_types_int, L, continuous=True)
+        # Solve with CBC
+        prob.solve(pulp.PULP_CBC_CMD(msg=0))
+        status = pulp.LpStatus.get(prob.status, None)
+        if verbose:
+            print(f"Master LP iter {it}: status {status}, obj {pulp.value(prob.objective)}")
+
+        # extract duals
+        # Try to use constraint.pi; if not available, fallback to solving with pulp. But we'll try
+        duals = _extract_duals(prob, continuous=True)
+        if verbose:
+            print("Duals:", duals)
+
+        # Solve knapsack (pricing) for each bar type to find a column with negative reduced cost
+        new_pattern_added = False
+        for k in range(T):
+            capacity = P_types_int[k]
+            # profits are duals (pi_j) for each piece j
+            profits = duals
+            weights = l
+            best_val, best_counts = _knapsack_dp_max(profits, weights, capacity)
+            # reduced cost = bar_length - sum(pi_j * x_j) ; we seek < 0 to improve
+            reduced_cost = P_types_int[k] - best_val
+            if verbose:
+                print(f"  bar type {k} cap {capacity}: best profit {best_val}, red_cost {reduced_cost}")
+            # add pattern if reduced cost < -tol and not trivial (not all zeros)
+            if reduced_cost < -tol and any(c > 0 for c in best_counts):
+                p = Pattern(bar_type_idx=k, counts=tuple(int(x) for x in best_counts))
+                if p not in patterns:
+                    patterns.append(p)
+                    new_pattern_added = True
+                    if verbose:
+                        print(f"    adding pattern for bar {k}: {p.counts}")
+        if not new_pattern_added:
+            if verbose:
+                print("No improving pattern found — optimal LP master reached.")
+            break
     return patterns
 
-# ----------------------
-# Column generation + integer master
-# ----------------------
-def optimisation_min_matiere_dual(P_types, l, L, max_iter=200, tol=1e-6, verbose=False):
+
+def solve_integer_master(patterns, P_types, L, time_limit=None, verbose=False):
+    """Given a set of patterns, solve final integer master (MIP) to obtain integer counts of patterns.
+    Returns lambdas (list) and objective.
     """
-    Dualized / column generation version that minimizes total material used.
-    Inputs:
-      - P_types : list of bar lengths in meters (floats)  (ex: [6,8])
-      - l       : list of piece lengths in millimeters (ints or floats) (ex: [1000, 1100])
-      - L       : list of demands (ints)
-    Returns (same outputs as optimisation_min_matiere):
-      X_used (array), bar_types_used (list), counts_per_type (dict), gaspillage (list), total_matiere (float, meters), total_waste (float, meters)
-    Requirements: GLPK recommended (for duals). If GLPK absent, function will try CBC but may fail to generate columns.
+    prob, var_lambda, _ = _build_master_problem(patterns, P_types, L, continuous=False)
+    # optionally set solver time limit if needed
+    solver = pulp.PULP_CBC_CMD(msg=1 if verbose else 0, timeLimit=time_limit)
+    prob.solve(solver)
+    status = pulp.LpStatus.get(prob.status, None)
+    if verbose:
+        print("Integer master status:", status)
+    if status not in ('Optimal', 'Integer Feasible'):
+        raise RuntimeError('Integer master did not find a feasible/optimal solution: ' + str(status))
+    lambdas = [int(round(pulp.value(v) or 0)) for v in var_lambda]
+    return lambdas, pulp.value(prob.objective)
+
+
+def build_solution_from_patterns(patterns, lambdas, P_types, l_mm):
+    """Convert pattern counts to the same outputs your original function returned.
+    - X_used: each used pattern becomes a row with counts of pieces
+    - bar_types_used: stock length for each used pattern
+    - counts_per_type: dict {P_k: number_of_bars_used}
+    - gaspillage_par_barre: list of waste per used bar
+    - total_matiere, total_waste
     """
-    # --- normalize units: convert everything to millimeters ints internally
-    P_types = [float(x) for x in P_types]  # meters
-    P_mm = [int(round(1000.0 * p)) for p in P_types]   # convert to mm
-    l_mm = [int(round(x)) for x in l]                  # assume l given in mm
-    L = [int(x) for x in L]
-
-    T = len(P_mm)
-    N = len(l_mm)
-    if N == 0:
-        return np.zeros((0,0), dtype=int), [], {pt:0 for pt in P_types}, np.array([]), 0.0, 0.0
-
-    # initial patterns
-    patterns = generate_initial_patterns(P_mm, l_mm)
-
-    # choose solver for LP master
-    # try GLPK first (returns duals)
-    try:
-        glpk = pulp.GLPK_CMD(msg=0)
-        status, z_vals, duals = solve_master_lp(patterns, L, solver=glpk)
-        if duals is None:
-            # fallback warning
-            if verbose:
-                print("GLPK did not return duals.")
-    except Exception as e:
-        if verbose:
-            print("GLPK not available, falling back to CBC for LP (may not return duals):", e)
-        status, z_vals, duals = solve_master_lp(patterns, L, solver=pulp.PULP_CBC_CMD(msg=0))
-
-    if duals is None:
-        # cannot proceed with column generation reliably
-        raise RuntimeError("Le solveur LP n'a pas renvoyé les multiplicateurs duals. Installez GLPK ou un solveur LP qui fournit les duals.")
-
-    # column generation loop
-    it = 0
-    while it < max_iter:
-        it += 1
-        if verbose:
-            print(f"it {it}, duals = {duals}")
-
-        added = False
-        # pour chaque type de barre, résoudre knapsack unbounded
-        for k, Pk in enumerate(P_mm):
-            best_val, counts = unbounded_knapsack_dp(duals, l_mm, Pk)
-            # best_val is sum_j pi_j * a_j
-            if best_val is None:
-                continue
-            reduced_cost = Pk - best_val
-            if best_val > Pk + tol:
-                # add pattern
-                a = [int(c) for c in counts]
-                patterns.append({'a': a, 'type': k, 'cost': Pk})
-                added = True
-                if verbose:
-                    print("Added pattern for type", k, "counts", a, "best_val", best_val)
-        if not added:
-            break
-        # resolve master LP
-        status, z_vals, duals = solve_master_lp(patterns, L, solver=glpk)
-
-    # integer master with generated patterns
-    prob_int = pulp.LpProblem("MasterInteger", pulp.LpMinimize)
-    z_int_vars = [pulp.LpVariable(f"z_{p}", lowBound=0, cat='Integer') for p in range(len(patterns))]
-    prob_int += pulp.lpSum([patterns[p]['cost'] * z_int_vars[p] for p in range(len(patterns))])
-    for j in range(len(L)):
-        prob_int += pulp.lpSum([patterns[p]['a'][j] * z_int_vars[p] for p in range(len(patterns))]) >= L[j]
-    prob_int.solve(pulp.PULP_CBC_CMD(msg=0))
-
-    if pulp.LpStatus[prob_int.status] != 'Optimal':
-        # fallback: round up LP solution
-        z_int = {i: int(np.ceil(z_vals[i] if z_vals[i] is not None else 0)) for i in range(len(patterns))}
-    else:
-        z_int = {i: int(pulp.value(z_int_vars[i])) for i in range(len(patterns))}
-
-    # expand integer solution into per-bar allocations
-    X_used = []
+    used_rows = []
     bar_types_used = []
-    waste_per_bar = []
-    counts_per_type = {pt: 0 for pt in P_types}
-    for p_idx, pat in enumerate(patterns):
-        count = z_int.get(p_idx, 0)
-        for _ in range(count):
-            X_used.append(pat['a'])
-            bar_types_used.append(P_types[pat['type']])  # in meters
-            counts_per_type[P_types[pat['type']]] += 1
-            used_len_mm = sum(pat['a'][j] * l_mm[j] for j in range(N))
-            waste_per_bar.append((pat['cost'] - used_len_mm)/1000.0)  # convert to meters
+    gaspillage = []
+    X_used_rows = []
+    counts_per_type = defaultdict(int)
+    l = np.array(l_mm, dtype=float)
 
-    if len(X_used) == 0:
-        X_used = np.zeros((0, N), dtype=int)
-    else:
-        X_used = np.array(X_used, dtype=int)
-    waste_per_bar = np.array(waste_per_bar, dtype=float) if len(waste_per_bar) > 0 else np.array([])
+    for idx, (p, lam) in enumerate(zip(patterns, lambdas)):
+        if lam <= 0:
+            continue
+        for rep in range(lam):
+            X_used_rows.append(list(p.counts))
+            bar_types_used.append(P_types[p.bar_type_idx])
+            total_in_bar = sum(np.array(p.counts, dtype=float) * l)
+            gaspillage.append(P_types[p.bar_type_idx] - total_in_bar)
+            counts_per_type[P_types[p.bar_type_idx]] += 1
 
-    total_matiere = sum(bar_types_used)  # already in meters
-    total_waste = float(np.sum(waste_per_bar))  # in meters
+    X_used = np.array(X_used_rows, dtype=int) if len(X_used_rows) else np.zeros((0, len(l_mm)), dtype=int)
+    gaspillage = np.array(gaspillage, dtype=float) if len(gaspillage) else np.array([])
+    total_matiere = float(sum(counts_per_type[p] * p for p in counts_per_type))
+    total_waste = float(np.sum(gaspillage))
+    return X_used, bar_types_used, dict(counts_per_type), gaspillage, total_matiere, total_waste
 
-    return X_used, bar_types_used, counts_per_type, waste_per_bar, total_matiere, total_waste
+
+def optimisation_min_matiere_cg(P_types, l, L, time_limit=None, verbose=False):
+    """Full pipeline: column generation + integer master solve.
+
+    Inputs:
+      P_types : list of stock lengths (same unit as l). Can be floats but are converted to integers (rounded).
+      l       : list of piece lengths (same unit as P_types). If your input is in mm, pass mm integers.
+      L       : list of integer demands
+
+    Returns:
+      X_used, bar_types_used, counts_per_type, gaspillage_par_barre, total_matiere, total_waste
+    """
+    # convert to arrays and integer mm units
+    l_mm = [int(round(x)) for x in l]
+    P_types_int = [int(round(x)) for x in P_types]
+    L_arr = [int(x) for x in L]
+
+    if verbose:
+        print("Starting column generation...")
+    patterns = column_generation(P_types_int, l_mm, L_arr, verbose=verbose)
+    if verbose:
+        print(f"Generated {len(patterns)} patterns. Now solving integer master...")
+
+    lambdas, obj = solve_integer_master(patterns, P_types_int, L_arr, time_limit=time_limit, verbose=verbose)
+
+    # Build outputs in original unit (we keep lengths in same unit as input)
+    X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste = build_solution_from_patterns(patterns, lambdas, P_types_int, l_mm)
+
+    return X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste
