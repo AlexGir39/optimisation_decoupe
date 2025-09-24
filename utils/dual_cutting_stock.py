@@ -256,7 +256,7 @@ def build_solution_from_patterns(patterns, lambdas, P_types, l_mm):
     gaspillage = []
     X_used_rows = []
     counts_per_type = defaultdict(int)
-    l = np.array(l_mm, dtype=float)
+    l = np.array(l_mm, dtype=float)/1000
 
     for idx, (p, lam) in enumerate(zip(patterns, lambdas)):
         if lam <= 0:
