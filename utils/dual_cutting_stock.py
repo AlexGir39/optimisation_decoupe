@@ -300,6 +300,6 @@ def optimisation_min_matiere_cg(P_types, l, L, time_limit=None, verbose=False):
     lambdas, obj = solve_integer_master(patterns, P_types_int, L_arr, time_limit=time_limit, verbose=verbose)
 
     # Build outputs in original unit (we keep lengths in same unit as input)
-    X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste = build_solution_from_patterns(patterns, lambdas, P_types_int, l_mm)
+    X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste = build_solution_from_patterns(patterns, lambdas, P_types_int, l_m)
 
     return X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste
