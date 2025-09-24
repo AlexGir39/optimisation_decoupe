@@ -256,7 +256,7 @@ def build_solution_from_patterns(patterns, lambdas, P_types, l_mm):
     gaspillage = []
     X_used_rows = []
     counts_per_type = defaultdict(int)
-    l = np.array(l_mm, dtype=float)/1000
+    l = np.array(l_mm, dtype=float)
 
     for idx, (p, lam) in enumerate(zip(patterns, lambdas)):
         if lam <= 0:
@@ -287,13 +287,13 @@ def optimisation_min_matiere_cg(P_types, l, L, time_limit=None, verbose=False):
       X_used, bar_types_used, counts_per_type, gaspillage_par_barre, total_matiere, total_waste
     """
     # convert to arrays and integer mm units
-    l_mm = [int(round(x)) for x in l]
+    l_m = [int(round(x))/1000 for x in l]
     P_types_int = [int(round(x)) for x in P_types]
     L_arr = [int(x) for x in L]
 
     if verbose:
         print("Starting column generation...")
-    patterns = column_generation(P_types_int, l_mm, L_arr, verbose=verbose)
+    patterns = column_generation(P_types_int, l_m, L_arr, verbose=verbose)
     if verbose:
         print(f"Generated {len(patterns)} patterns. Now solving integer master...")
 
