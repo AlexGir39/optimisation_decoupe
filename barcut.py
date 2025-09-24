@@ -30,7 +30,7 @@ df_result = st.data_editor(df_input, num_rows="fixed")
 L = df_result["Quantité demandée"].tolist()
 
 if st.button("Optimiser"):
-    X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste = optimisation_min_matiere_cg(P_types, [val/1000 for val in l], L)
+    X_used, bar_types_used, counts_per_type, gaspillage, total_matiere, total_waste = optimisation_min_matiere(P_types, [val/1000 for val in l], L)
 
     if X_used is None or X_used.shape[0] == 0:
         st.error("⚠️ Aucun plan optimal trouvé.")

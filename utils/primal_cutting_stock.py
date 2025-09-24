@@ -16,7 +16,7 @@ def optimisation_min_matiere(P_types, l, L, solver_msg=False):
       - total_waste : gaspillage total
     """
     P_types = list(map(float, P_types))
-    l = np.array(l, dtype=float)/1000
+    l = np.array(l, dtype=float)
     L = np.array(L, dtype=int)
     T = len(P_types)
     N = len(l)
